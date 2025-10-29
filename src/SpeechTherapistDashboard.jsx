@@ -8,7 +8,9 @@ import {
   updateDoc, 
   deleteDoc, 
   doc, 
-  serverTimestamp 
+  serverTimestamp,
+  query,
+  where
 } from 'firebase/firestore';
 import {
   BarChart,
@@ -52,53 +54,66 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 
-// Function to send notification to app users
-const sendNotificationToApp = async (title, body, data = {}) => {
+// UPDATED: Function to send notification to app users with proper format
+const sendNotificationToApp = async (changeType, foodData, oldFoodData = null) => {
   try {
-    console.log('Sending notification to app:', { title, body, data });
+    console.log('Sending notification:', { changeType, foodData, oldFoodData });
     
-    // Create notification document that app can listen to
-    const notificationData = {
-      title: title,
-      body: body,
-      data: data,
-      timestamp: new Date().toISOString(),
-      serverTimestamp: serverTimestamp(),
-      read: false,
-      sent: false,
-      type: 'food_update',
-      priority: 'high',
-      // Add trigger field for app to detect changes
-      trigger: new Date().getTime(),
-      // Add notification type for app routing
-      notificationType: data.type || 'general',
-      // Add user targeting (send to all users)
-      targetAudience: 'all',
-      // Platform specific
-      sound: 'default',
-      badge: 1,
-    };
+    // Get all users to send notifications
+    const usersSnapshot = await getDocs(collection(db, 'users'));
+    const users = usersSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    
+    console.log(`Sending notifications to ${users.length} users`);
+    
+    // Create notification for each user
+    const notificationPromises = users.map(async (user) => {
+      // Generate formal message based on change type
+      let message;
+      switch (changeType.toLowerCase()) {
+        case 'added':
+          message = foodData.iddsi_level 
+            ? `${foodData.name} was added to Level ${foodData.iddsi_level}`
+            : `${foodData.name} was added`;
+          break;
+        case 'deleted':
+          message = `${foodData.name} was deleted`;
+          break;
+        case 'updated':
+          if (oldFoodData && oldFoodData.iddsi_level && foodData.iddsi_level && 
+              oldFoodData.iddsi_level !== foodData.iddsi_level) {
+            message = `${foodData.name}'s level was changed from Level ${oldFoodData.iddsi_level} to Level ${foodData.iddsi_level}`;
+          } else {
+            message = `${foodData.name} was updated`;
+          }
+          break;
+        default:
+          message = `${foodData.name} was modified`;
+      }
 
-    const docRef = await addDoc(collection(db, 'notifications'), notificationData);
-    console.log('Notification created with ID:', docRef.id);
-    
-    // Also add to a simpler 'app_updates' collection for easy listening
-    await addDoc(collection(db, 'app_updates'), {
-      updateType: data.type,
-      title: title,
-      message: body,
-      foodId: data.foodId || null,
-      foodName: data.foodName || null,
-      iddsiLevel: data.iddsiLevel || null,
-      category: data.category || null,
-      timestamp: serverTimestamp(),
-      createdAt: new Date().toISOString(),
+      const notificationData = {
+        userId: user.id,
+        changeType: changeType,
+        foodName: foodData.name,
+        message: message,
+        iddsiLevel: foodData.iddsi_level || null,
+        oldLevel: oldFoodData?.iddsi_level || null,
+        category: foodData.category || null,
+        description: foodData.description || null,
+        preparation: foodData.preparation || null,
+        texture: foodData.texture || null,
+        timestamp: serverTimestamp(),
+        read: false,
+        foodId: foodData.id || null,
+      };
+
+      return addDoc(collection(db, 'notifications'), notificationData);
     });
-    
-    console.log('Notification and update sent successfully');
+
+    await Promise.all(notificationPromises);
+    console.log(`Successfully sent ${users.length} notifications`);
     return true;
   } catch (error) {
-    console.error('Error sending notification:', error);
+    console.error('Error sending notifications:', error);
     console.error('Error details:', error.message);
     return false;
   }
@@ -238,7 +253,7 @@ function SpeechTherapistDashboard() {
       setStats(prev => ({ 
         ...prev, 
         totalQuestions: questionsData.length,
-        unansweredQuestions: 0  // Not tracking answered/unanswered anymore
+        unansweredQuestions: 0
       }));
     } catch (error) {
       console.error('Error fetching reported issues:', error);
@@ -266,7 +281,7 @@ function SpeechTherapistDashboard() {
     localStorage.removeItem('therapistLoggedIn');
   };
 
-  // Add food - FIXED with better error handling and notifications
+  // UPDATED: Add food with proper notification format
   const handleAddFood = async () => {
     try {
       const newFood = {
@@ -286,20 +301,11 @@ function SpeechTherapistDashboard() {
       console.log('Adding food:', newFood);
       const docRef = await addDoc(collection(db, 'foods'), newFood);
       
-      // Send notification to app users
-      await sendNotificationToApp(
-        'New Food Added!',
-        `${foodForm.name} (Level ${foodForm.iddsi_level}) has been added to the food library.`,
-        {
-          type: 'food_added',
-          foodId: docRef.id,
-          foodName: foodForm.name,
-          iddsiLevel: foodForm.iddsi_level,
-          category: foodForm.category,
-        }
-      );
+      // Send notification with proper format
+      const foodDataWithId = { ...newFood, id: docRef.id };
+      await sendNotificationToApp('added', foodDataWithId);
       
-      alert('Food added successfully and notification sent to app users!');
+      alert('Food added successfully and notifications sent to all app users!');
       setShowFoodModal(false);
       resetFoodForm();
       fetchFoods();
@@ -316,7 +322,7 @@ function SpeechTherapistDashboard() {
     }
   };
 
-  // Update food - FIXED PROPERLY with error handling and notifications
+  // UPDATED: Update food with proper notification format including oldLevel
   const handleUpdateFood = async () => {
     try {
       if (!editingFood || !editingFood.id) {
@@ -324,6 +330,16 @@ function SpeechTherapistDashboard() {
         return;
       }
       
+      // Store old food data for comparison
+      const oldFoodData = {
+        name: editingFood.name,
+        iddsi_level: editingFood.iddsi_level,
+        category: editingFood.category,
+        description: editingFood.description,
+        preparation: editingFood.preparation,
+        texture: editingFood.texture,
+      };
+
       const foodData = {
         name: foodForm.name,
         description: foodForm.description || '',
@@ -336,26 +352,17 @@ function SpeechTherapistDashboard() {
       };
 
       console.log('Updating food ID:', editingFood.id);
-      console.log('Update data:', foodData);
+      console.log('Old data:', oldFoodData);
+      console.log('New data:', foodData);
 
-      // FIXED: Proper Firestore doc reference
       const foodRef = doc(db, 'foods', editingFood.id);
       await updateDoc(foodRef, foodData);
       
-      // Send notification to app users
-      await sendNotificationToApp(
-        'Food Updated!',
-        `${foodForm.name} (Level ${foodForm.iddsi_level}) has been updated.`,
-        {
-          type: 'food_updated',
-          foodId: editingFood.id,
-          foodName: foodForm.name,
-          iddsiLevel: foodForm.iddsi_level,
-          category: foodForm.category,
-        }
-      );
+      // Send notification with both old and new data
+      const foodDataWithId = { ...foodData, id: editingFood.id };
+      await sendNotificationToApp('updated', foodDataWithId, oldFoodData);
       
-      alert('Food updated successfully and notification sent to app users!');
+      alert('Food updated successfully and notifications sent to all app users!');
       setShowFoodModal(false);
       setEditingFood(null);
       resetFoodForm();
@@ -374,27 +381,19 @@ function SpeechTherapistDashboard() {
     }
   };
 
-  // Delete food with better error handling and notifications
+  // UPDATED: Delete food with proper notification format
   const handleDeleteFood = async (food) => {
     if (window.confirm(`Are you sure you want to delete "${food.name}"?`)) {
       try {
         console.log('Deleting food ID:', food.id);
+        
+        // Send notification before deleting
+        await sendNotificationToApp('deleted', food);
+        
+        // Then delete the food
         await deleteDoc(doc(db, 'foods', food.id));
         
-        // Send notification to app users
-        await sendNotificationToApp(
-          'Food Removed',
-          `${food.name} (Level ${food.iddsi_level}) has been removed from the food library.`,
-          {
-            type: 'food_deleted',
-            foodId: food.id,
-            foodName: food.name,
-            iddsiLevel: food.iddsi_level,
-            category: food.category,
-          }
-        );
-        
-        alert('Food deleted successfully and notification sent to app users!');
+        alert('Food deleted successfully and notifications sent to all app users!');
         fetchFoods();
       } catch (error) {
         console.error('Error deleting food:', error);
@@ -568,8 +567,6 @@ function SpeechTherapistDashboard() {
             <span>Overview</span>
           </button>
 
-          {/* REMOVED Users Tab */}
-
           <button
             style={{...styles.navItem, ...(activeTab === 'foods' && styles.navItemActive)}}
             onClick={() => setActiveTab('foods')}
@@ -610,12 +607,12 @@ function SpeechTherapistDashboard() {
             <h1 style={styles.pageTitle}>
               {activeTab === 'overview' && 'Dashboard Overview'}
               {activeTab === 'foods' && 'Food Library Management'}
-              {activeTab === 'questions' && 'Reported Issues'} {/* CHANGED */}
+              {activeTab === 'questions' && 'Reported Issues'}
             </h1>
             <p style={styles.pageSubtitle}>
               {activeTab === 'overview' && 'Monitor app usage and manage content'}
               {activeTab === 'foods' && 'Manage IDDSI-compliant food database'}
-              {activeTab === 'questions' && 'View and respond to user issues'} {/* CHANGED */}
+              {activeTab === 'questions' && 'View and respond to user issues'}
             </p>
           </div>
         </div>
@@ -651,11 +648,9 @@ function SpeechTherapistDashboard() {
                 </div>
                 <div style={styles.statContent}>
                   <h3 style={styles.statValue}>{stats.totalQuestions}</h3>
-                  <p style={styles.statLabel}>Total Issues</p> {/* CHANGED */}
+                  <p style={styles.statLabel}>Total Issues</p>
                 </div>
               </div>
-
-
             </div>
 
             {/* Charts - USERS NOT FOODS! */}
@@ -783,7 +778,7 @@ function SpeechTherapistDashboard() {
                       <th style={styles.th}>Level</th>
                       <th style={styles.th}>Category</th>
                       <th style={styles.th}>Description</th>
-                      <th style={styles.th}>Comments</th> {/* ADDED */}
+                      <th style={styles.th}>Comments</th>
                       <th style={styles.th}>Actions</th>
                     </tr>
                   </thead>
@@ -1340,12 +1335,12 @@ const styles = {
     display: 'flex',
     flexDirection: 'column',
     boxShadow: '4px 0 10px rgba(0,0,0,0.1)',
-    position: 'fixed',        // FIXED: Make sidebar static
-    top: 0,                   // FIXED: Anchor to top
-    left: 0,                  // FIXED: Anchor to left
-    height: '100vh',          // FIXED: Full viewport height
-    overflowY: 'auto',        // FIXED: Allow scrolling within sidebar if needed
-    zIndex: 100,              // FIXED: Keep sidebar on top
+    position: 'fixed',
+    top: 0,
+    left: 0,
+    height: '100vh',
+    overflowY: 'auto',
+    zIndex: 100,
   },
   sidebarHeader: {
     padding: '30px 20px',
@@ -1451,10 +1446,10 @@ const styles = {
   // Main Content
   mainContent: {
     flex: 1,
-    marginLeft: '280px',      // FIXED: Add margin for fixed sidebar
+    marginLeft: '280px',
     padding: '30px',
     overflowY: 'auto',
-    minHeight: '100vh',       // FIXED: Ensure full height
+    minHeight: '100vh',
   },
   header: {
     marginBottom: '30px',
