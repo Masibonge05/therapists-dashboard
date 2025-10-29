@@ -57,22 +57,49 @@ const sendNotificationToApp = async (title, body, data = {}) => {
   try {
     console.log('Sending notification to app:', { title, body, data });
     
-    // Add notification to Firestore for the app to pick up
-    await addDoc(collection(db, 'notifications'), {
+    // Create notification document that app can listen to
+    const notificationData = {
       title: title,
       body: body,
       data: data,
-      timestamp: serverTimestamp(),
+      timestamp: new Date().toISOString(),
+      serverTimestamp: serverTimestamp(),
       read: false,
-      type: 'dashboard_update',
+      sent: false,
+      type: 'food_update',
       priority: 'high',
-      createdAt: serverTimestamp(),
+      // Add trigger field for app to detect changes
+      trigger: new Date().getTime(),
+      // Add notification type for app routing
+      notificationType: data.type || 'general',
+      // Add user targeting (send to all users)
+      targetAudience: 'all',
+      // Platform specific
+      sound: 'default',
+      badge: 1,
+    };
+
+    const docRef = await addDoc(collection(db, 'notifications'), notificationData);
+    console.log('Notification created with ID:', docRef.id);
+    
+    // Also add to a simpler 'app_updates' collection for easy listening
+    await addDoc(collection(db, 'app_updates'), {
+      updateType: data.type,
+      title: title,
+      message: body,
+      foodId: data.foodId || null,
+      foodName: data.foodName || null,
+      iddsiLevel: data.iddsiLevel || null,
+      category: data.category || null,
+      timestamp: serverTimestamp(),
+      createdAt: new Date().toISOString(),
     });
     
-    console.log('Notification sent successfully');
+    console.log('Notification and update sent successfully');
     return true;
   } catch (error) {
     console.error('Error sending notification:', error);
+    console.error('Error details:', error.message);
     return false;
   }
 };
@@ -113,6 +140,10 @@ function SpeechTherapistDashboard() {
     texture: '',
     tips: '',
   });
+
+  // Comments modal state
+  const [showCommentsModal, setShowCommentsModal] = useState(false);
+  const [selectedFoodComments, setSelectedFoodComments] = useState(null);
 
   // Search and filter state
   const [searchTerm, setSearchTerm] = useState('');
@@ -376,6 +407,12 @@ function SpeechTherapistDashboard() {
         }
       }
     }
+  };
+
+  // Open comments modal
+  const openCommentsModal = (food) => {
+    setSelectedFoodComments(food);
+    setShowCommentsModal(true);
   };
 
   // Open edit modal
@@ -754,7 +791,24 @@ function SpeechTherapistDashboard() {
                     {filteredFoods.map((food) => (
                       <tr key={food.id} style={styles.tr}>
                         <td style={styles.td}>
-                          <span style={styles.foodName}>{food.name}</span>
+                          <div>
+                            <span style={styles.foodName}>{food.name}</span>
+                            {/* Star Rating Display */}
+                            <div style={styles.ratingDisplay}>
+                              {[1, 2, 3, 4, 5].map((star) => (
+                                <Star
+                                  key={star}
+                                  size={14}
+                                  color="#FFD700"
+                                  fill={star <= (food.average_rating || 0) ? "#FFD700" : "none"}
+                                  style={{ marginRight: '2px' }}
+                                />
+                              ))}
+                              <span style={styles.ratingText}>
+                                {food.average_rating ? food.average_rating.toFixed(1) : '0.0'}
+                              </span>
+                            </div>
+                          </div>
                         </td>
                         <td style={styles.td}>
                           <span style={styles.levelBadge}>Level {food.iddsi_level}</span>
@@ -768,10 +822,23 @@ function SpeechTherapistDashboard() {
                           </span>
                         </td>
                         <td style={styles.td}>
-                          {/* SHOW COMMENTS COUNT */}
-                          <span style={styles.commentCount}>
+                          {/* Clickable Comments Count */}
+                          <button
+                            style={{
+                              ...styles.commentCount,
+                              cursor: food.comments && food.comments.length > 0 ? 'pointer' : 'default',
+                              opacity: food.comments && food.comments.length > 0 ? 1 : 0.5,
+                            }}
+                            onClick={() => {
+                              if (food.comments && food.comments.length > 0) {
+                                openCommentsModal(food);
+                              }
+                            }}
+                            disabled={!food.comments || food.comments.length === 0}
+                          >
+                            <MessageSquare size={14} style={{ marginRight: '4px' }} />
                             {food.comments?.length || 0} comments
-                          </span>
+                          </button>
                         </td>
                         <td style={styles.td}>
                           <div style={styles.actionButtons}>
@@ -827,6 +894,17 @@ function SpeechTherapistDashboard() {
           </div>
         )}
       </div>
+
+      {/* Comments Modal */}
+      {showCommentsModal && selectedFoodComments && (
+        <CommentsModal
+          food={selectedFoodComments}
+          onClose={() => {
+            setShowCommentsModal(false);
+            setSelectedFoodComments(null);
+          }}
+        />
+      )}
 
       {/* Food Modal */}
       {showFoodModal && (
@@ -905,6 +983,125 @@ function QuestionCard({ question }) {
             <span style={styles.metadataValue}>{question.issueType}</span>
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+// Comments Modal Component
+function CommentsModal({ food, onClose }) {
+  // Format timestamp
+  const formatDate = (timestamp) => {
+    if (!timestamp) return 'Unknown date';
+    try {
+      if (timestamp.toDate) {
+        return timestamp.toDate().toLocaleDateString('en-US', {
+          year: 'numeric',
+          month: 'short',
+          day: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit'
+        });
+      }
+      if (timestamp instanceof Date) {
+        return timestamp.toLocaleDateString('en-US', {
+          year: 'numeric',
+          month: 'short',
+          day: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit'
+        });
+      }
+      return new Date(timestamp).toLocaleDateString('en-US', {
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+      });
+    } catch (error) {
+      return 'Unknown date';
+    }
+  };
+
+  const comments = food.comments || [];
+  const averageRating = food.average_rating || 0;
+
+  return (
+    <div style={styles.modalOverlay} onClick={onClose}>
+      <div style={styles.commentsModalContent} onClick={(e) => e.stopPropagation()}>
+        <div style={styles.modalHeader}>
+          <div>
+            <h2 style={styles.modalTitle}>Comments for {food.name}</h2>
+            <div style={styles.modalSubtitle}>
+              <Star size={16} color="#FFD700" fill="#FFD700" style={{ marginRight: '5px' }} />
+              <span style={styles.avgRatingText}>
+                {averageRating.toFixed(1)} average rating
+              </span>
+              <span style={styles.commentCountText}>
+                • {comments.length} {comments.length === 1 ? 'comment' : 'comments'}
+              </span>
+            </div>
+          </div>
+          <button style={styles.modalCloseButton} onClick={onClose}>
+            <X size={24} />
+          </button>
+        </div>
+
+        <div style={styles.commentsModalBody}>
+          {comments.length === 0 ? (
+            <div style={styles.noComments}>
+              <MessageSquare size={48} color="#ccc" />
+              <p style={styles.noCommentsText}>No comments yet</p>
+            </div>
+          ) : (
+            <div style={styles.commentsList}>
+              {comments.map((comment, index) => (
+                <div key={index} style={styles.commentCard}>
+                  <div style={styles.commentHeader}>
+                    <div style={styles.commentUserInfo}>
+                      <span style={styles.commentUserName}>
+                        {comment.userName || 'Anonymous User'}
+                      </span>
+                      <span style={styles.commentDate}>
+                        {formatDate(comment.timestamp || comment.createdAt)}
+                      </span>
+                    </div>
+                    <div style={styles.commentRating}>
+                      {[1, 2, 3, 4, 5].map((star) => (
+                        <Star
+                          key={star}
+                          size={16}
+                          color="#FFD700"
+                          fill={star <= (comment.rating || 0) ? "#FFD700" : "none"}
+                        />
+                      ))}
+                      <span style={styles.commentRatingText}>
+                        {comment.rating || 0}
+                      </span>
+                    </div>
+                  </div>
+                  <div style={styles.commentBody}>
+                    <p style={styles.commentText}>
+                      {comment.comment || comment.text || 'No comment text'}
+                    </p>
+                  </div>
+                  {comment.userEmail && (
+                    <div style={styles.commentFooter}>
+                      <span style={styles.commentEmail}>{comment.userEmail}</span>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div style={styles.commentsModalFooter}>
+          <button style={styles.closeCommentsButton} onClick={onClose}>
+            Close
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -1505,6 +1702,19 @@ const styles = {
   foodName: {
     fontWeight: '600',
     color: '#2d3748',
+    display: 'block',
+    marginBottom: '5px',
+  },
+  ratingDisplay: {
+    display: 'flex',
+    alignItems: 'center',
+    marginTop: '4px',
+  },
+  ratingText: {
+    fontSize: '13px',
+    color: '#718096',
+    marginLeft: '6px',
+    fontWeight: '600',
   },
   levelBadge: {
     display: 'inline-block',
@@ -1533,13 +1743,16 @@ const styles = {
     whiteSpace: 'nowrap',
   },
   commentCount: {
-    display: 'inline-block',
+    display: 'inline-flex',
+    alignItems: 'center',
     padding: '5px 12px',
     background: '#fffaf0',
     color: '#c05621',
+    border: '1px solid #fed7aa',
     borderRadius: '12px',
     fontSize: '12px',
     fontWeight: '600',
+    transition: 'all 0.2s',
   },
   actionButtons: {
     display: 'flex',
@@ -1687,6 +1900,133 @@ const styles = {
     maxHeight: '90vh',
     overflow: 'auto',
     boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
+  },
+  
+  // Comments Modal Specific
+  commentsModalContent: {
+    background: 'white',
+    borderRadius: '20px',
+    width: '100%',
+    maxWidth: '800px',
+    maxHeight: '90vh',
+    overflow: 'hidden',
+    boxShadow: '0 20px 60px rgba(0,0,0,0.3)',
+    display: 'flex',
+    flexDirection: 'column',
+  },
+  commentsModalBody: {
+    padding: '0 25px',
+    flex: 1,
+    overflowY: 'auto',
+    maxHeight: 'calc(90vh - 180px)',
+  },
+  commentsModalFooter: {
+    padding: '20px 25px',
+    borderTop: '1px solid #e2e8f0',
+    display: 'flex',
+    justifyContent: 'flex-end',
+  },
+  modalSubtitle: {
+    display: 'flex',
+    alignItems: 'center',
+    fontSize: '14px',
+    color: '#718096',
+    marginTop: '8px',
+  },
+  avgRatingText: {
+    fontWeight: '600',
+    color: '#2d3748',
+  },
+  commentCountText: {
+    marginLeft: '8px',
+  },
+  
+  // Comments List
+  commentsList: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '16px',
+    paddingBottom: '20px',
+  },
+  noComments: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: '60px 20px',
+    color: '#a0aec0',
+  },
+  noCommentsText: {
+    marginTop: '16px',
+    fontSize: '16px',
+  },
+  
+  // Comment Card
+  commentCard: {
+    background: '#f7fafc',
+    borderRadius: '12px',
+    padding: '16px',
+    border: '1px solid #e2e8f0',
+  },
+  commentHeader: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    marginBottom: '12px',
+  },
+  commentUserInfo: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '4px',
+  },
+  commentUserName: {
+    fontSize: '15px',
+    fontWeight: '600',
+    color: '#2d3748',
+  },
+  commentDate: {
+    fontSize: '12px',
+    color: '#a0aec0',
+  },
+  commentRating: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '4px',
+  },
+  commentRatingText: {
+    fontSize: '13px',
+    fontWeight: '600',
+    color: '#2d3748',
+    marginLeft: '4px',
+  },
+  commentBody: {
+    marginBottom: '8px',
+  },
+  commentText: {
+    fontSize: '14px',
+    color: '#4a5568',
+    lineHeight: '1.6',
+    margin: 0,
+    whiteSpace: 'pre-wrap',
+  },
+  commentFooter: {
+    paddingTop: '8px',
+    borderTop: '1px solid #e2e8f0',
+  },
+  commentEmail: {
+    fontSize: '12px',
+    color: '#718096',
+  },
+  closeCommentsButton: {
+    padding: '12px 24px',
+    background: '#e2e8f0',
+    color: '#4a5568',
+    border: 'none',
+    borderRadius: '10px',
+    fontSize: '14px',
+    fontWeight: '600',
+    cursor: 'pointer',
+    transition: 'all 0.2s',
   },
   modalHeader: {
     display: 'flex',

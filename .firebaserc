@@ -1,0 +1,9 @@
+{
+  "projects": {
+    "default": "iddsi-app"
+  },
+  "targets": {},
+  "functions": {
+    "predeploy": []
+  }
+}
